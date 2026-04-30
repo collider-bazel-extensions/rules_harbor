@@ -4,14 +4,12 @@
 # payload comes back byte-for-byte. Proves Harbor's HTTP API + auth +
 # registry-backend storage all work end-to-end.
 #
-# Strategy:
-#   1. `kubectl run` a pod with `gcr.io/go-containerregistry/crane`.
-#   2. From the pod: `crane auth login` against Harbor's user-facing
-#      Service (`harbor.harbor.svc:80`), HTTP only — `--insecure`.
-#   3. Build a tarball with a unique payload, `crane append --new_tag`
-#      to push it as a 1-layer OCI image.
-#   4. `crane export` the resulting image's filesystem from Harbor;
-#      extract the payload file; assert content matches.
+# Strategy: a single in-cluster `kubectl run` with the
+# `gcr.io/go-containerregistry/crane:debug` image (busybox-shelled,
+# unlike `:latest` which is bare distroless). The inline script runs
+# the full assertion and exits; `kubectl run --rm --attach` blocks for
+# its exit code and streams its stdout. No long-lived "keep-alive" pod
+# needed.
 set -euo pipefail
 
 CLUSTER_NAME="cluster"
@@ -22,88 +20,66 @@ source "$env_file"
 
 KCTL=("$KUBECTL" --kubeconfig="$KUBECONFIG")
 
-# Service `harbor` (in ns harbor) routes to harbor-nginx → core/portal/registry.
-HARBOR_HOST="harbor.harbor.svc"
 NS="${HARBOR_SMOKE_NS:-default}"
 PAYLOAD="rules_harbor-smoke-$RANDOM-$(date +%s)"
 TAG="smoke-${PAYLOAD//[^A-Za-z0-9._-]/_}"
 
-# crane image — pre-built OCI client. Drops into a kubernetes Pod via
-# `kubectl run`. Its ENTRYPOINT runs the `crane` CLI directly, but we
-# want a long-running shell in there so we can issue several crane
-# subcommands; --command -- tail -f /dev/null keeps it alive.
-echo "smoke_test: launching crane pod"
-"${KCTL[@]}" -n "$NS" run harbor-crane \
-    --restart=Never \
-    --image=gcr.io/go-containerregistry/crane:latest \
-    --command -- tail -f /dev/null
-trap '"${KCTL[@]}" -n "$NS" delete pod harbor-crane --ignore-not-found --wait=false >/dev/null 2>&1 || true' EXIT
-"${KCTL[@]}" -n "$NS" wait pod/harbor-crane --for=condition=Ready --timeout=120s
+# Inline script. Single-quoted heredoc preserves $VAR escapes — the
+# variables resolve inside the pod shell, not on the test driver.
+# Values are passed in via --env below.
+read -r -d '' SCRIPT <<'CRANE_EOF' || true
+set -e
+export HOME=/tmp
+HOST="harbor.harbor.svc"
 
-# Wait for Harbor's HTTP layer to actually serve responses (Deployments
-# Ready != "ready to serve" — the reverse-proxy can be Ready before
-# core's auth service is alive).
-echo "smoke_test: waiting for Harbor /api/v2.0/health"
-deadline=$(( $(date +%s) + 180 ))
-while (( $(date +%s) < deadline )); do
-  if "${KCTL[@]}" -n "$NS" exec harbor-crane -- \
-        wget -qO- "http://${HARBOR_HOST}/api/v2.0/health" 2>/dev/null | grep -q '"status":"healthy"'; then
+echo "[crane] preparing 1-layer tarball (payload=$PAYLOAD)"
+mkdir -p /tmp/work/data
+printf '%s\n' "$PAYLOAD" > /tmp/work/data/payload.txt
+tar -cf /tmp/work/layer.tar -C /tmp/work data
+
+# Harbor's Deployments going Available != "registry HTTP path is wired."
+# nginx-front + core boot in different orders; the registry endpoint
+# can 502 for a few seconds after the Deployment readiness gate. Poll
+# /api/v2.0/health for the canonical "healthy" before pushing.
+echo "[crane] waiting for ${HOST}/api/v2.0/health"
+i=0
+while [ $i -lt 60 ]; do
+  if wget -qO- "http://${HOST}/api/v2.0/health" 2>/dev/null | grep -q '"status":"healthy"'; then
+    echo "[crane]   harbor health: ok"
     break
   fi
-  sleep 5
+  sleep 3
+  i=$((i + 1))
 done
-if ! "${KCTL[@]}" -n "$NS" exec harbor-crane -- \
-        wget -qO- "http://${HARBOR_HOST}/api/v2.0/health" 2>/dev/null | grep -q '"status":"healthy"'; then
-  echo "smoke_test: FAIL — Harbor /api/v2.0/health never reported 'healthy'" >&2
-  "${KCTL[@]}" -n "$NS" exec harbor-crane -- \
-      wget -qO- "http://${HARBOR_HOST}/api/v2.0/health" 2>&1 | head -50 >&2 || true
+wget -qO- "http://${HOST}/api/v2.0/health" 2>/dev/null | grep -q '"status":"healthy"' \
+  || { echo "FAIL: /api/v2.0/health never reported healthy" >&2; exit 1; }
+
+echo "[crane] auth login as admin"
+crane auth login "${HOST}" -u admin -p Harbor12345
+
+echo "[crane] append --new_tag ${HOST}/library/smoke:${TAG}  (push)"
+crane append \
+  --new_layer /tmp/work/layer.tar \
+  --new_tag "${HOST}/library/smoke:${TAG}" \
+  --insecure
+
+echo "[crane] export ${HOST}/library/smoke:${TAG}  (pull)"
+crane export "${HOST}/library/smoke:${TAG}" - --insecure \
+  | tar -xO data/payload.txt > /tmp/got.txt
+
+GOT="$(cat /tmp/got.txt)"
+if [ "$GOT" = "$PAYLOAD" ]; then
+  echo "SMOKE_OK — payload round-tripped through Harbor"
+else
+  echo "SMOKE_FAIL got='$GOT' expected='$PAYLOAD'" >&2
   exit 1
 fi
-echo "smoke_test: /api/v2.0/health -> healthy"
+CRANE_EOF
 
-# crane stores its config under $HOME/.docker/config.json — set a writable
-# HOME so login can persist.
-echo "smoke_test: crane auth login"
-"${KCTL[@]}" -n "$NS" exec harbor-crane -- sh -c \
-  "HOME=/tmp crane auth login ${HARBOR_HOST} -u admin -p Harbor12345"
-
-# Build a tiny tarball with a unique payload. The path inside the tarball
-# determines where the file ends up in the image's filesystem at export
-# time.
-echo "smoke_test: building synthetic 1-layer image (payload=$PAYLOAD)"
-"${KCTL[@]}" -n "$NS" exec harbor-crane -- sh -c "
-set -e
-mkdir -p /tmp/work/data
-echo '$PAYLOAD' > /tmp/work/data/payload.txt
-tar -cf /tmp/work/layer.tar -C /tmp/work data
-"
-
-# Push: crane append takes a base image (or none — produces a 1-layer image)
-# + a layer tarball + a tag. The tag is a registry ref, so the resulting
-# image is pushed to that ref.
-echo "smoke_test: crane append --new_tag ${HARBOR_HOST}/library/smoke:${TAG}"
-"${KCTL[@]}" -n "$NS" exec harbor-crane -- sh -c "
-set -e
-HOME=/tmp crane append \
-    --new_layer /tmp/work/layer.tar \
-    --new_tag ${HARBOR_HOST}/library/smoke:${TAG} \
-    --insecure
-"
-
-# Pull back: crane export streams the image's flattened filesystem as a
-# tarball. We extract just the payload file and compare to what we sent.
-echo "smoke_test: crane export → extract data/payload.txt → compare"
-got=$("${KCTL[@]}" -n "$NS" exec harbor-crane -- sh -c "
-HOME=/tmp crane export ${HARBOR_HOST}/library/smoke:${TAG} - --insecure \
-  | tar -xO data/payload.txt
-")
-
-if [[ "$got" != "$PAYLOAD" ]]; then
-  echo "smoke_test: FAIL — payload didn't round-trip" >&2
-  echo "  expected: '$PAYLOAD'" >&2
-  echo "  got:      '$got'" >&2
-  echo "---- harbor pods ----" >&2
-  "${KCTL[@]}" -n harbor get pods >&2 || true
-  exit 1
-fi
-echo "smoke_test: OK — synthetic image round-tripped through Harbor (push + pull)"
+echo "smoke_test: launching crane:debug pod (single-shot)"
+"${KCTL[@]}" -n "$NS" run --rm -i harbor-crane \
+    --image=gcr.io/go-containerregistry/crane:debug \
+    --restart=Never \
+    --env="PAYLOAD=$PAYLOAD" \
+    --env="TAG=$TAG" \
+    --command -- /busybox/sh -c "$SCRIPT"
