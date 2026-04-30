@@ -1,0 +1,8 @@
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["harbor.yaml"])
+
+filegroup(
+    name = "manifest",
+    srcs = ["harbor.yaml"],
+)

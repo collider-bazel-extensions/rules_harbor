@@ -1,0 +1,85 @@
+# Render-time values for rules_harbor's pinned manifest.
+#
+# Smoke-fixture footprint: HTTP only (no TLS), default admin password,
+# emptyDir storage, scanner / notary / chartmuseum disabled. NOT a
+# production starting point — production deployments must override
+# every `expose.*` and `harborAdminPassword` field, switch to a real
+# StorageClass (or external object storage), and probably enable Trivy.
+
+expose:
+  type: clusterIP
+  tls:
+    enabled: false   # smoke uses HTTP + `crane --insecure`
+  clusterIP:
+    name: harbor
+    annotations: {}
+    ports:
+      httpPort: 80
+
+# externalURL is what Harbor uses for self-references (UI redirects, etc.).
+# Tests don't use the UI, but the chart requires this set.
+externalURL: http://harbor
+
+persistence:
+  enabled: false   # emptyDir for everything; lost on pod restart, fine for tests
+
+# Default admin password. CHART DEFAULT — production must override.
+harborAdminPassword: Harbor12345
+
+# Stateless components — single replica is enough for the smoke. Production
+# would scale these to N for HA.
+core:
+  replicas: 1
+portal:
+  replicas: 1
+jobservice:
+  replicas: 1
+registry:
+  replicas: 1
+
+# Internal embedded DB / Redis. Production would point at external
+# managed services (RDS, Cloud SQL, ElastiCache, MemoryStore, etc.).
+database:
+  type: internal
+redis:
+  type: internal
+
+# Scanner + observability + extensions off — heavy and orthogonal to the
+# core OCI-registry smoke.
+trivy:
+  enabled: false
+exporter:
+  enabled: false
+
+# Resource requests trimmed so Harbor fits in a kind cluster's memory
+# budget alongside whatever else the consumer composes.
+core:
+  replicas: 1
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 10m
+portal:
+  replicas: 1
+  resources:
+    requests:
+      memory: 32Mi
+      cpu: 10m
+jobservice:
+  replicas: 1
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 10m
+registry:
+  replicas: 1
+  registry:
+    resources:
+      requests:
+        memory: 64Mi
+        cpu: 10m
+  controller:
+    resources:
+      requests:
+        memory: 32Mi
+        cpu: 10m

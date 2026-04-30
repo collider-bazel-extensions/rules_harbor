@@ -1,0 +1,26 @@
+"""Maintainer-only render flow."""
+
+load("@rules_helm//:defs.bzl", "helm_template")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+# ---- 1.18.3 -----------------------------------------------------------------
+
+helm_template(
+    name = "render_harbor_1_18_3",
+    chart = ["@harbor_chart_1_18_3//:files"],
+    values = ["//config:harbor-values.yaml"],
+    namespace = "harbor",
+    release_name = "harbor",
+    include_crds = True,
+)
+
+sh_binary(
+    name = "render_writeback_1_18_3",
+    srcs = ["writeback.sh"],
+    data = [":render_harbor_1_18_3"],
+    args = [
+        "$(rootpath :render_harbor_1_18_3)",
+        "private/manifests/harbor.yaml",
+    ],
+    visibility = ["//visibility:public"],
+)

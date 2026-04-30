@@ -1,0 +1,8 @@
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["harbor-values.yaml"])
+
+filegroup(
+    name = "harbor_values",
+    srcs = ["harbor-values.yaml"],
+)
