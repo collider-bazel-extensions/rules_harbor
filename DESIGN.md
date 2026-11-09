@@ -55,3 +55,7 @@ glue + a committed pre-rendered manifest.
 - **Multi-version chart support** — single pin in v0.1.
 - **Replication smoke** — Harbor → Harbor mirroring. Production but heavy.
 - **Helm chart hosting smoke** — Harbor hosts helm charts too; orthogonal to OCI registry storage.
+
+## Release archive contents (v0.1.1)
+
+`tests/` and `tools/` are `export-ignore` (`.gitattributes`): their packages load dev-only modules, which made `@rules_harbor//...` unloadable for consumers. GitHub's tag tarballs honour it; a `git_override` clone still contains them. `REPO.bazel` `ignore_directories` isn't used because it would also hide them from this repo's own `bazel test`. CI's `consumer` job (`.github/consumer/check.sh`) queries `//...` from the commit's `git archive`. Same fix as rules_kubectl#5 / rules_atlas#12.
