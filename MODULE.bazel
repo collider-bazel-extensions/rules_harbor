@@ -6,7 +6,7 @@ kubectl_apply_health_check targets pre-configured for Harbor.
 
 module(
     name = "rules_harbor",
-    version = "0.1.0",
+    version = "0.1.1",
 )
 
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
