@@ -202,3 +202,11 @@ PRs welcome. Conventions match the sibling rule sets:
 - TLS via cert-manager-issued Secret smoke variant
 - Trivy scanner smoke (push image, trigger scan, assert vulnerabilities returned)
 - Robot account smoke (push/pull as scoped robot, not admin)
+
+---
+
+## Requesting a new rules package
+
+Want Bazel rules for another tool or service?
+[Request a rules package](https://github.com/collider-bazel-extensions/.github/issues/new?template=request-a-rules-package.yml).
+The [organization page](https://github.com/collider-bazel-extensions) lists every package.
